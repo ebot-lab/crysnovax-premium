@@ -1,4 +1,5 @@
 name = "crysnovax-premium"
+account_id = "282b269d2530a8f05d715d715c81ba69"
 main = "src/worker.js"
 compatibility_date = "2026-07-16"
 workers_dev = true
