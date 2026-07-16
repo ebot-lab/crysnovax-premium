@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en" class="bg-background">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5">
+  <meta name="theme-color" content="#14201e">
+  <meta name="description" content="CODYE premium Telegram community operations dashboard">
+  <title>CODYE Control Center</title>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#overview" aria-label="CODYE dashboard home"><span class="brand-mark">C</span><span><strong>CODYE</strong><small>Control Center</small></span></a>
+      <nav aria-label="Primary navigation">
+        <p class="nav-label">Workspace</p>
+        <button class="nav-item active" data-view="overview"><span class="nav-icon">01</span>Overview</button>
+        <button class="nav-item" data-view="broadcasts"><span class="nav-icon">02</span>Broadcast studio</button>
+        <button class="nav-item" data-view="moderation"><span class="nav-icon">03</span>Moderation</button>
+        <button class="nav-item" data-view="groups"><span class="nav-icon">04</span>Groups</button>
+        <button class="nav-item" data-view="users"><span class="nav-icon">05</span>User intelligence</button>
+        <p class="nav-label">Administration</p>
+        <button class="nav-item" data-view="roles"><span class="nav-icon">06</span>Roles & access</button>
+        <button class="nav-item" data-view="localization"><span class="nav-icon">07</span>Localization</button>
+        <button class="nav-item" data-view="audit"><span class="nav-icon">08</span>Audit log</button>
+      </nav>
+      <div class="sidebar-footer"><span class="status-dot"></span><span><strong>System operational</strong><small id="identity">Checking session</small></span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <button class="menu-button" id="menuButton" aria-label="Open navigation" aria-expanded="false">Menu</button>
+        <div><p class="eyebrow">Telegram operations</p><h1 id="pageTitle">Overview</h1></div>
+        <div class="top-actions"><button class="button secondary" id="refreshButton">Refresh</button><button class="button ghost" id="logoutButton">Sign out</button></div>
+      </header>
+
+      <section class="view active" id="overview" aria-labelledby="pageTitle">
+        <div class="hero-panel"><div><p class="eyebrow light">Command center</p><h2>Every community signal,<br>under control.</h2><p>Live visibility across audiences, moderation, campaigns, and operational health.</p></div><div class="hero-status"><span>Live</span><strong id="liveClock">--:--</strong><small>Last synchronized now</small></div></div>
+        <div class="metrics">
+          <article><span>Observed users</span><strong id="usersMetric">—</strong><small>Complete activity registry</small></article>
+          <article><span>Managed groups</span><strong id="groupsMetric">—</strong><small>Active communities</small></article>
+          <article><span>Campaigns</span><strong id="campaignsMetric">—</strong><small>Draft, scheduled, sent</small></article>
+          <article><span>Moderation actions</span><strong id="actionsMetric">—</strong><small>Auditable decisions</small></article>
+        </div>
+        <div class="dashboard-grid">
+          <article class="panel span-2"><div class="panel-heading"><div><p class="eyebrow">Platform pulse</p><h2>Operations at a glance</h2></div><span class="pill success">Live data</span></div><div class="pulse-chart" aria-label="Platform activity visualization"><i style="--h:36%"></i><i style="--h:49%"></i><i style="--h:43%"></i><i style="--h:66%"></i><i style="--h:59%"></i><i style="--h:84%"></i><i style="--h:73%"></i><i style="--h:92%"></i><i style="--h:78%"></i><i style="--h:96%"></i></div><div class="chart-labels"><span>Users</span><span>Groups</span><span>Campaigns</span><span>Actions</span></div></article>
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Shortcuts</p><h2>Quick actions</h2></div></div><div class="quick-actions"><button data-go="broadcasts"><span>New campaign</span><small>Compose and schedule</small></button><button data-go="moderation"><span>Review moderation</span><small>Inspect recent actions</small></button><button data-go="roles"><span>Manage access</span><small>Assign team permissions</small></button></div></article>
+        </div>
+      </section>
+
+      <section class="view" id="broadcasts">
+        <div class="section-grid studio-grid">
+          <article class="panel composer"><div class="panel-heading"><div><p class="eyebrow">Message constructor</p><h2>Create campaign</h2></div><span class="pill">Draft</span></div>
+            <form id="campaignForm">
+              <div class="field-row"><label>Campaign name<input name="name" required maxlength="80" placeholder="Community update"></label><label>Audience<select name="audience"><option value="both">All reachable users</option><option value="dms">Direct messages</option><option value="groups">Managed groups</option></select></label></div>
+              <div class="format-bar" role="toolbar" aria-label="Message formatting"><button type="button" data-format="bold"><strong>B</strong></button><button type="button" data-format="italic"><em>I</em></button><button type="button" data-format="underline"><u>U</u></button><button type="button" data-format="strike"><s>S</s></button><button type="button" data-format="spoiler">Spoiler</button><button type="button" data-format="quote">Quote</button><button type="button" data-format="code">Code</button></div>
+              <label>Message<textarea id="campaignMessage" name="message" required maxlength="4096" rows="9" placeholder="Write the message exactly as your audience should receive it."></textarea><span class="field-hint"><span>Telegram formatting supported</span><span id="charCount">0 / 4096</span></span></label>
+              <fieldset><legend>Inline buttons <small>Up to 8, arranged in rows</small></legend><div id="buttonBuilder"></div><button class="text-button" type="button" id="addButton">Add button</button></fieldset>
+              <div class="field-row"><label>Delivery<select name="delivery" id="deliveryMode"><option value="draft">Save draft</option><option value="now">Send now</option><option value="schedule">Schedule</option></select></label><label id="scheduleField" hidden>Send at<input name="runAt" type="datetime-local"></label></div>
+              <div class="form-actions"><button class="button secondary" type="button" id="saveTemplate">Save template</button><button class="button primary" type="submit">Save campaign</button></div><p class="form-result" id="campaignResult" role="status"></p>
+            </form>
+          </article>
+          <aside class="preview-card"><div class="preview-top"><span>Telegram preview</span><span id="previewTime">now</span></div><div class="telegram-bubble"><p id="messagePreview">Your campaign preview will appear here.</p><div id="buttonPreview" class="preview-buttons"></div></div><div class="preview-meta"><span>Formatting-safe entities</span><span>Animated emoji ready</span></div></aside>
+        </div>
+        <article class="panel list-panel"><div class="panel-heading"><div><p class="eyebrow">Campaign registry</p><h2>Recent campaigns</h2></div></div><div id="campaignList" class="data-list"></div></article>
+      </section>
+
+      <section class="view" id="moderation"><div class="section-intro"><div><p class="eyebrow">Safety operations</p><h2>Moderation timeline</h2><p>Warnings, restrictions, captcha failures, and administrator actions in one immutable view.</p></div><div class="filter-row"><input id="moderationSearch" type="search" placeholder="Filter actions" aria-label="Filter moderation actions"></div></div><article class="panel"><div id="moderationList" class="data-list"></div></article></section>
+      <section class="view" id="groups"><div class="section-intro"><div><p class="eyebrow">Community portfolio</p><h2>Managed groups</h2><p>Language, activity, and policy state across every observed community.</p></div></div><article class="panel"><div id="groupsList" class="data-list"></div></article></section>
+      <section class="view" id="users"><div class="section-intro"><div><p class="eyebrow">Audience intelligence</p><h2>Observed users</h2><p>First seen, last active, reachability, language, and moderation history.</p></div><input id="userSearch" type="search" placeholder="Search name, username, or ID" aria-label="Search users"></div><article class="panel"><div id="usersList" class="data-list"></div></article></section>
+      <section class="view" id="roles"><div class="section-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">RBAC</p><h2>Grant dashboard access</h2></div></div><form id="roleForm"><label>Telegram user ID<input name="telegramId" inputmode="numeric" required placeholder="8205792268"></label><label>Role<select name="role"><option value="super_admin">Super admin</option><option value="moderator">Moderator</option><option value="broadcaster">Broadcast manager</option><option value="analyst">Analyst</option><option value="support">Support agent</option></select></label><button class="button primary" type="submit">Grant role</button><p class="form-result" id="roleResult"></p></form></article><article class="panel"><div class="panel-heading"><div><p class="eyebrow">Team</p><h2>Current access</h2></div></div><div id="rolesList" class="data-list"></div></article></div></section>
+      <section class="view" id="localization"><div class="section-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">Localization</p><h2>Language coverage</h2></div></div><div class="language-grid"><span>English<strong>Complete</strong></span><span>Spanish<strong>Complete</strong></span><span>French<strong>Complete</strong></span><span>German<strong>Complete</strong></span><span>Portuguese<strong>Complete</strong></span><span>Arabic<strong>Complete</strong></span><span>Hindi<strong>Complete</strong></span><span>Russian<strong>Complete</strong></span></div></article><article class="panel"><p class="eyebrow">AI translation</p><h2>Content localization</h2><p class="muted">Campaign content uses curated interface strings and AI-assisted translation while preserving Telegram entities, links, and custom emoji.</p><div class="notice">Core command language remains deterministic. AI is used only for administrator-authored content.</div></article></div></section>
+      <section class="view" id="audit"><div class="section-intro"><div><p class="eyebrow">Accountability</p><h2>Audit log</h2><p>Every privileged dashboard and moderation action, attributed and timestamped.</p></div></div><article class="panel"><div id="auditsList" class="data-list"></div></article></section>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/dashboard.js" defer></script>
+</body>
+</html>
