@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "premium:dev": "wrangler dev --config premium-worker/wrangler.toml",
+    "premium:migrate": "wrangler d1 migrations apply crysnovax-premium --local --config premium-worker/wrangler.toml",
+    "premium:deploy": "wrangler deploy --config premium-worker/wrangler.toml"
   },
   "dependencies": {
     "axios": "^1.7.2",
@@ -19,7 +22,8 @@
     "yt-search": "^2.10.4"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "nodemon": "^3.1.0",
+    "wrangler": "^4.111.0"
   },
   "engines": {
     "node": ">=16.0.0"

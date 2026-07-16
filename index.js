@@ -12,8 +12,10 @@ const express = require('express');
 const https = require('https');
 const crypto = require('crypto');
 const premiumStore = require('./lib/premium-store');
+const { PremiumClient, PremiumApiError } = require('./lib/premium-client');
 
-const token = '8289204973:AAHFeXFMIihfZ3nrZgaxYulUEGAmLZAjaGY';
+const token = process.env.TELEGRAM_BOT_TOKEN || '8289204973:AAHFeXFMIihfZ3nrZgaxYulUEGAmLZAjaGY';
+const premiumApi = new PremiumClient();
 
 // ─── AI CONFIG ───
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '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';
@@ -1063,7 +1065,7 @@ const EMOJI_RIDDLES = [
     { emojis: '🐕🍝👨‍🍳', answers: ['ratatouille'] },
     { emojis: '🚗⚡', answers: ['cars'] },
     { emojis: '🤖❤️', answers: ['wall-e', 'walle'] },
-    { emojis: '🎮👾', answers: ['wreck-it ralph', 'wreck it ralph'] },
+    { emojis: '��👾', answers: ['wreck-it ralph', 'wreck it ralph'] },
     { emojis: '🐉🏹', answers: ['how to train your dragon'] },
     { emojis: '🧊⛄❄️', answers: ['frozen'] },
     { emojis: '🌊🐢', answers: ['finding nemo', 'finding dory'] },
@@ -1274,7 +1276,7 @@ function buildMenuKeyboard() {
 }
 
 // ─── KEYBOARD COMMANDS ───
-const KEYBOARD_COMMANDS = ['Status', 'Settings', 'Users', 'Refresh', 'Language', 'Menu', 'Close'];
+const KEYBOARD_COMMANDS = ['Status', 'Settings', 'Premium', 'Refresh', 'Language', 'Menu', 'Close'];
 
 // ─── AI SYSTEM PROMPT (TRAINED) ───
 const AI_SYSTEM_PROMPT = `You are a helpful, friendly, and knowledgeable AI assistant. Your name is CODY AI.
@@ -1558,16 +1560,51 @@ async function handleAIQuery(chatId, replyToId, query) {
 // prefix: it re-tests the same regex against a rebuilt '/'-prefixed string
 // and calls the same handler directly, so no command logic is duplicated.
 const __cmdRegistry = [];
+const PREMIUM_METERED_COMMANDS = new Set(['ask', 'search', 'short', 'wallpaper', 'generate', 'aiedit', 'play', 'tt', 'ttsearch', 'unid', 'lyrics', 'movie', 'livematch', 'tts', 'scan', 'screenshot', 'weather', 'github', 'tggroup', 'tempemail', 'sketch', 'tojif', 'qrread']);
 
 function activePrefixOf(chatId) {
     return getGroup(chatId).prefix || '/';
 }
 
+function commandNameFrom(msg) {
+    return String(msg.text || '').match(/^[/!]([a-z0-9_]+)/i)?.[1]?.toLowerCase() || '';
+}
+
+async function checkPremiumCommand(msg) {
+    const command = commandNameFrom(msg);
+    if (!PREMIUM_METERED_COMMANDS.has(command) || !premiumApi.configured()) return { allowed: true };
+    try {
+        const result = await premiumApi.consume({
+            requestId: `cmd:${msg.chat.id}:${msg.message_id}:${command}`,
+            command,
+            userId: msg.from.id,
+            chatId: msg.chat.type === 'private' ? null : msg.chat.id,
+            owner: isProtectedOwner(msg.from.id)
+        });
+        if (!result.allowed) {
+            const text = result.reason === 'rate_limited'
+                ? `Daily /${command} limit reached (${result.limit}). Open Premium for higher limits.`
+                : result.reason === 'premium_required' ? `/${command} requires Premium.` : `/${command} is currently unavailable.`;
+            await bot.sendMessage(msg.chat.id, text, { reply_to_message_id: msg.message_id, reply_markup: { inline_keyboard: [[{ text: 'View Premium', callback_data: 'premium_home' }]] } });
+        }
+        return result;
+    } catch (error) {
+        console.error('Premium access check failed:', error.message);
+        await bot.sendMessage(msg.chat.id, 'Premium usage service is temporarily unavailable. Free management and game commands still work.');
+        return { allowed: false };
+    }
+}
+
 function onCmd(regexp, callback) {
-    __cmdRegistry.push({ regexp, callback });
+    const gated = async (msg, match) => {
+        const access = await checkPremiumCommand(msg);
+        if (!access.allowed) return;
+        return callback(msg, match);
+    };
+    __cmdRegistry.push({ regexp, callback: gated });
     bot.onText(regexp, async (msg, match) => {
         if (activePrefixOf(msg.chat.id) !== '/') return;
-        return callback(msg, match);
+        return gated(msg, match);
     });
 }
 
@@ -1869,7 +1906,7 @@ Thank you for choosing us, ${userName}! 🎉
             reply_markup: {
                 keyboard: [
                     ['Status', 'Settings'],
-                    ['Users', 'Refresh'],
+                    ['Premium', 'Refresh'],
                     ['Language'],
                     ['Menu', 'Close']
                 ],
@@ -1909,6 +1946,23 @@ Thank you for choosing us, ${userName}! 🎉
                 }
             );
         } catch (e) {}
+        return;
+    }
+
+    // ─── PREMIUM NAVIGATION ───
+    if (data === 'premium_home' || data === 'premium_plans' || data === 'premium_docs') {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+        await showPremiumMenu({ chat: query.message.chat, from: query.from, message_id: query.message.message_id }, data, true);
+        return;
+    }
+    if (data.startsWith('premium_buy_')) {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+        await startPremiumCheckout(query.message.chat, query.from, data.replace('premium_buy_', ''));
+        return;
+    }
+    if (data.startsWith('donate_')) {
+        await bot.answerCallbackQuery(query.id).catch(() => {});
+        await startDonationCheckout(query.message.chat.id, query.from.id, Number(data.replace('donate_', '')));
         return;
     }
 
@@ -8773,7 +8827,7 @@ bot.on('message', async (msg) => {
 
     // ─── KEYBOARD BUTTON HANDLER ───
     if (KEYBOARD_COMMANDS.includes(text)) {
-        if (['Status', 'Refresh', 'Users'].includes(text) && !isProtectedOwner(msg.from.id)) {
+        if (['Status', 'Refresh'].includes(text) && !isProtectedOwner(msg.from.id)) {
             await bot.sendMessage(chatId, 'Owner only.');
             return;
         }
@@ -8791,10 +8845,10 @@ bot.on('message', async (msg) => {
             await showSettings(msg);
             return;
         }
-        if (text === 'Users') {
-            await showUsersList(msg);
-            return;
-        }
+if (text === 'Premium') {
+  await showPremiumMenu(msg);
+  return;
+  }
         if (text === 'Refresh') {
             loadDB();
             const statusMsg = `Cache Refreshed\n\nDatabase reloaded\nGroups: ${Object.keys(db).length}\nDM Users: ${dmUsers.size}\nPremium Emojis: ${Object.keys(PREMIUM_EMOJIS).length}`;
@@ -9685,6 +9739,120 @@ bot.on('message', async (msg) => {
             }, 30000);
         }
     }
+});
+
+// ============================================================
+// PREMIUM PLANS, TELEGRAM STARS & DONATIONS
+// ============================================================
+
+function formatPremiumExpiry(value) {
+    if (!value) return 'Not active';
+    return new Date(value).toLocaleString('en-GB', { timeZone: 'UTC', dateStyle: 'medium', timeStyle: 'short' }) + ' UTC';
+}
+
+async function showPremiumMenu(msg, view = 'premium_home', edit = false) {
+    const chatId = msg.chat.id;
+    if (!premiumApi.configured()) return bot.sendMessage(chatId, 'Premium is being configured. Please try again later.');
+    try {
+        const [{ plans }, status] = await Promise.all([premiumApi.plans(), premiumApi.status(msg.from.id, msg.chat.type === 'private' ? null : chatId)]);
+        const groupContext = msg.chat.type !== 'private';
+        let text;
+        let keyboard;
+        if (view === 'premium_docs') {
+            text = `Premium Guide\n\nPersonal premium follows you in every chat. Group premium gives members premium access only inside that group. Group purchases require a group admin.\n\nLight tools such as /ask, /search, /short and /wallpaper remain free with fair-use limits; Premium removes those limits. Games and group management remain free.`;
+            keyboard = [[{ text: 'View plans', callback_data: 'premium_plans' }], [{ text: 'Back', callback_data: 'premium_home' }]];
+        } else if (view === 'premium_plans') {
+            const available = plans.filter(plan => plan.scope === 'user' || (groupContext && plan.scope === 'group'));
+            text = `Premium Plans\n\nLaunch pricing is shown in Telegram Stars. Monthly plans renew every 30 days; daily and weekly plans are one-time passes.`;
+            keyboard = available.map(plan => [{ text: `${plan.name} · ${plan.stars} Stars`, callback_data: `premium_buy_${plan.id}` }]);
+            keyboard.push([{ text: 'Back', callback_data: 'premium_home' }]);
+        } else {
+            text = `Crysnovax Premium\n\nStatus: ${status.premium ? 'Active' : 'Free'}\nAccess: ${status.source}\nPersonal expiry: ${formatPremiumExpiry(status.personal?.expires_at)}\nGroup expiry: ${formatPremiumExpiry(status.group?.expires_at)}\n\nGet larger AI, image and media limits, unlimited light tools, and durable access that survives bot restarts.`;
+            keyboard = [[{ text: 'Available plans', callback_data: 'premium_plans' }], [{ text: 'Benefits & guide', callback_data: 'premium_docs' }], [{ text: 'Donate Stars', callback_data: 'donate_10' }]];
+        }
+        const options = { reply_markup: { inline_keyboard: keyboard } };
+        if (edit) return bot.editMessageText(text, { chat_id: chatId, message_id: msg.message_id, ...options }).catch(() => bot.sendMessage(chatId, text, options));
+        return bot.sendMessage(chatId, text, options);
+    } catch (error) {
+        console.error('Premium menu failed:', error.message);
+        return bot.sendMessage(chatId, 'Premium service is temporarily unavailable. Please try again shortly.');
+    }
+}
+
+async function startPremiumCheckout(chat, buyer, planId) {
+    try {
+        const { plans } = await premiumApi.plans();
+        const plan = plans.find(item => item.id === planId);
+        if (!plan) throw new Error('This plan is no longer available.');
+        let targetId = buyer.id;
+        if (plan.scope === 'group') {
+            if (chat.type === 'private') throw new Error('Open Premium inside the group you want to upgrade.');
+            if (!(await isAdmin(chat.id, buyer.id))) throw new Error('Only a current group admin can buy a group plan.');
+            targetId = chat.id;
+        }
+        const intent = await premiumApi.createIntent({ kind: 'plan', planId, buyerId: buyer.id, targetScope: plan.scope, targetId, idempotencyKey: `intent:${buyer.id}:${chat.id}:${planId}:${Date.now()}` });
+        await bot.sendInvoice(chat.id, `Crysnovax ${plan.name}`, `${plan.benefits.join(' • ')}. Access starts after Telegram confirms payment.`, intent.payload, '', 'XTR', [{ label: plan.name, amount: intent.stars }], { ...(plan.recurring ? { subscription_period: 2592000 } : {}), start_parameter: `premium-${plan.id}` });
+    } catch (error) { await bot.sendMessage(chat.id, error.message || 'Unable to create checkout.'); }
+}
+
+async function startDonationCheckout(chatId, buyerId, stars) {
+    if (!Number.isInteger(stars) || stars < 1 || stars > 10000) return bot.sendMessage(chatId, 'Donation must be between 1 and 10,000 Stars.');
+    try {
+        const intent = await premiumApi.createIntent({ kind: 'donation', buyerId, targetScope: 'user', targetId: buyerId, stars, idempotencyKey: `donation:${buyerId}:${Date.now()}` });
+        await bot.sendInvoice(chatId, 'Support Crysnovax', 'A voluntary donation. This does not grant Premium access.', intent.payload, '', 'XTR', [{ label: 'Donation', amount: stars }]);
+    } catch (error) { await bot.sendMessage(chatId, 'Donation checkout is temporarily unavailable.'); }
+}
+
+onCmd(/^\/premium(?:@\w+)?$/, msg => showPremiumMenu(msg));
+onCmd(/^\/plans(?:@\w+)?$/, msg => showPremiumMenu(msg, 'premium_plans'));
+onCmd(/^\/donate(?:@\w+)?(?:\s+(\d+))?$/, async (msg, match) => {
+    const stars = match[1] ? Number(match[1]) : null;
+    if (stars) return startDonationCheckout(msg.chat.id, msg.from.id, stars);
+    return bot.sendMessage(msg.chat.id, 'Choose a donation amount or use /donate <stars>.', { reply_markup: { inline_keyboard: [[5, 10, 25].map(amount => ({ text: `${amount} Stars`, callback_data: `donate_${amount}` }))] } });
+});
+
+bot.on('pre_checkout_query', async query => {
+    try {
+        const nonce = String(query.invoice_payload || '').replace('premium:', '');
+        const result = await premiumApi.validateIntent({ nonce, buyerId: query.from.id, stars: query.total_amount });
+        if (result.intent.target_scope === 'group' && !(await isAdmin(Number(result.intent.target_id), query.from.id))) throw new Error('You must still be a group admin to complete this purchase.');
+        await bot.answerPreCheckoutQuery(query.id, true);
+    } catch (error) { await bot.answerPreCheckoutQuery(query.id, false, { error_message: String(error.message || 'Checkout validation failed').slice(0, 200) }); }
+});
+
+bot.on('message', async msg => {
+    const payment = msg.successful_payment;
+    if (!payment || payment.currency !== 'XTR') return;
+    const nonce = String(payment.invoice_payload || '').replace('premium:', '');
+    try {
+        await premiumApi.payment({ nonce, buyerId: msg.from.id, stars: payment.total_amount, telegramChargeId: payment.telegram_payment_charge_id, providerChargeId: payment.provider_payment_charge_id, recurring: payment.is_recurring, idempotencyKey: `telegram:${payment.telegram_payment_charge_id}`, raw: payment });
+        await bot.sendMessage(msg.chat.id, 'Payment confirmed. Your Premium access is active now. Use /premium to view it.');
+    } catch (error) {
+        console.error('Premium payment persistence failed:', error.message);
+        await bot.sendMessage(msg.chat.id, 'Telegram confirmed your payment. Activation is being reconciled; keep this payment message as your receipt.');
+    }
+});
+
+// Owner emergency controls use the same Worker audit path as the dashboard.
+onCmd(/^\/premiumgift(?:@\w+)?\s+(user|group)\s+(-?\d+)\s+(personal_daily|personal_weekly|personal_monthly|group_daily|group_weekly|group_monthly)(?:\s+(.+))?$/, async (msg, match) => {
+    if (!isProtectedOwner(msg.from.id)) return bot.sendMessage(msg.chat.id, 'Owner only.');
+    try { await premiumApi.manage('gift', { actorId: msg.from.id, scope: match[1], telegramId: match[2], planId: match[3], reason: match[4] || 'Owner gift', idempotencyKey: `gift:${msg.message_id}` }); await bot.sendMessage(msg.chat.id, 'Premium gift applied.'); }
+    catch (error) { await bot.sendMessage(msg.chat.id, `Gift failed: ${error.message}`); }
+});
+onCmd(/^\/premiumrestrict(?:@\w+)?\s+(user|group)\s+(-?\d+)(?:\s+(ban|restrict))?(?:\s+(.+))?$/, async (msg, match) => {
+    if (!isProtectedOwner(msg.from.id)) return bot.sendMessage(msg.chat.id, 'Owner only.');
+    try { await premiumApi.manage('restrict', { actorId: msg.from.id, scope: match[1], telegramId: match[2], kind: match[3] || 'ban', reason: match[4] || 'Owner restriction', idempotencyKey: `restriction:${msg.message_id}` }); await bot.sendMessage(msg.chat.id, 'Restriction applied.'); }
+    catch (error) { await bot.sendMessage(msg.chat.id, `Restriction failed: ${error.message}`); }
+});
+onCmd(/^\/premiumlookup(?:@\w+)?\s+(-?\d+)(?:\s+(-?\d+))?$/, async (msg, match) => {
+    if (!isProtectedOwner(msg.from.id)) return bot.sendMessage(msg.chat.id, 'Owner only.');
+    try { const status = await premiumApi.status(match[1], match[2] || null); await bot.sendMessage(msg.chat.id, `Premium lookup\n\nUser: ${match[1]}\nStatus: ${status.premium ? 'Active' : 'Free'}\nSource: ${status.source}\nPersonal expiry: ${formatPremiumExpiry(status.personal?.expires_at)}\nGroup expiry: ${formatPremiumExpiry(status.group?.expires_at)}\nRestriction: ${status.restriction?.kind || 'None'}`); }
+    catch (error) { await bot.sendMessage(msg.chat.id, `Lookup failed: ${error.message}`); }
+});
+onCmd(/^\/premiumreset(?:@\w+)?\s+(user|group)\s+(-?\d+)$/, async (msg, match) => {
+    if (!isProtectedOwner(msg.from.id)) return bot.sendMessage(msg.chat.id, 'Owner only.');
+    try { await premiumApi.manage('reset', { actorId: msg.from.id, scope: match[1], telegramId: match[2], idempotencyKey: `reset:${msg.message_id}` }); await bot.sendMessage(msg.chat.id, 'Premium usage counters reset.'); }
+    catch (error) { await bot.sendMessage(msg.chat.id, `Reset failed: ${error.message}`); }
 });
 
 // ============================================================

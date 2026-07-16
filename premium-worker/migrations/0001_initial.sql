@@ -1,0 +1,32 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, scope TEXT NOT NULL CHECK(scope IN ('user','group')), name TEXT NOT NULL, stars INTEGER NOT NULL CHECK(stars > 0), duration_seconds INTEGER NOT NULL, recurring INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, benefits TEXT NOT NULL DEFAULT '[]', display_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS commands (name TEXT PRIMARY KEY, category TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, premium_only INTEGER NOT NULL DEFAULT 0, free_limit INTEGER, premium_limit INTEGER, group_limit INTEGER, member_limit INTEGER, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS subjects (scope TEXT NOT NULL CHECK(scope IN ('user','group')), telegram_id TEXT NOT NULL, display_name TEXT, username TEXT, metadata TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL, PRIMARY KEY(scope, telegram_id));
+CREATE TABLE IF NOT EXISTS entitlements (id TEXT PRIMARY KEY, scope TEXT NOT NULL, telegram_id TEXT NOT NULL, plan_id TEXT, starts_at TEXT NOT NULL, expires_at TEXT NOT NULL, recurring INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', source TEXT NOT NULL, gifted_by TEXT, reason TEXT, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS entitlements_subject ON entitlements(scope, telegram_id, status, expires_at);
+CREATE TABLE IF NOT EXISTS usage_daily (day TEXT NOT NULL, scope TEXT NOT NULL, telegram_id TEXT NOT NULL, member_id TEXT NOT NULL DEFAULT '', command TEXT NOT NULL, category TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, denied INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(day, scope, telegram_id, member_id, command));
+CREATE TABLE IF NOT EXISTS invoice_intents (nonce TEXT PRIMARY KEY, kind TEXT NOT NULL, plan_id TEXT, buyer_id TEXT NOT NULL, target_scope TEXT, target_id TEXT, stars INTEGER NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS payments (id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, telegram_charge_id TEXT UNIQUE, provider_charge_id TEXT, kind TEXT NOT NULL, plan_id TEXT, buyer_id TEXT NOT NULL, target_scope TEXT, target_id TEXT, stars INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'XTR', status TEXT NOT NULL, recurring INTEGER NOT NULL DEFAULT 0, raw TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS restrictions (id TEXT PRIMARY KEY, scope TEXT NOT NULL, telegram_id TEXT NOT NULL, kind TEXT NOT NULL, command TEXT, reason TEXT, expires_at TEXT, active INTEGER NOT NULL DEFAULT 1, actor_id TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS restrictions_subject ON restrictions(scope, telegram_id, active);
+CREATE TABLE IF NOT EXISTS admins (telegram_id TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('owner','operator')), display_name TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, telegram_id TEXT NOT NULL, csrf TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS nonces (value TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL, target_type TEXT, target_id TEXT, before_json TEXT, after_json TEXT, reason TEXT, request_id TEXT, created_at TEXT NOT NULL);
+
+INSERT OR IGNORE INTO plans VALUES ('personal_daily','user','Daily',10,86400,0,1,'["Premium command quotas","Unlimited light tools"]',1,datetime('now'));
+INSERT OR IGNORE INTO plans VALUES ('personal_weekly','user','Weekly',50,604800,0,1,'["Higher premium quotas","Unlimited light tools"]',2,datetime('now'));
+INSERT OR IGNORE INTO plans VALUES ('personal_monthly','user','Monthly',140,2592000,1,1,'["Highest personal quotas","Renews every 30 days"]',3,datetime('now'));
+INSERT OR IGNORE INTO plans VALUES ('group_daily','group','Group Daily',20,86400,0,1,'["Premium access for the group","Member fair-use protection"]',4,datetime('now'));
+INSERT OR IGNORE INTO plans VALUES ('group_weekly','group','Group Weekly',100,604800,0,1,'["Premium access for the group","Larger shared quotas"]',5,datetime('now'));
+INSERT OR IGNORE INTO plans VALUES ('group_monthly','group','Group Monthly',280,2592000,1,1,'["Highest group quotas","Renews every 30 days"]',6,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('ask','light',1,0,30,NULL,NULL,NULL,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('search','light',1,0,30,NULL,NULL,NULL,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('short','light',1,0,30,NULL,NULL,NULL,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('wallpaper','light',1,0,20,NULL,NULL,NULL,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('generate','heavy_ai',1,0,2,25,80,20,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('aiedit','heavy_ai',1,0,2,25,80,20,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('play','media',1,0,5,40,120,30,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('tt','media',1,0,5,40,120,30,datetime('now'));
+INSERT OR IGNORE INTO commands VALUES ('unid','media',1,0,5,40,120,30,datetime('now'));
