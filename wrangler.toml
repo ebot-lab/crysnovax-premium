@@ -6,7 +6,7 @@ workers_dev = true
 
 [vars]
 DASHBOARD_ORIGIN = "https://premium.crysnova.qzz.io"
-API_VERSION = "v1.2"
+API_VERSION = "v1"
 API_SECRET = "CARAYASATA1LALA2VA3"
 TELEGRAM_BOT_USERNAME = "CODYEBOT"
 ADMIN_TELEGRAM_IDS = "7770578824"
