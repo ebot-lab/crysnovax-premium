@@ -30,6 +30,25 @@ async function telegramLogin(request, env) {
   await env.DB.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').bind(session, String(fields.id), csrf, new Date(Date.now() + 604800000).toISOString(), now()).run();
   return json({ ok: true, csrf }, 200, { 'set-cookie': `premium_session=${session}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800` });
 }
+async function sha256hex(value) { return hex(await crypto.subtle.digest('SHA-256', encoder.encode(value))); }
+async function passwordLogin(request, env) {
+  if (!env.ADMIN_PASSWORD) throw new ApiError('ADMIN_PASSWORD secret is not set on the worker', 503, 'not_configured');
+  const adminId = String(env.ADMIN_TELEGRAM_IDS || '').split(',').map(x => x.trim()).filter(Boolean)[0];
+  if (!adminId) throw new ApiError('ADMIN_TELEGRAM_IDS secret is not set on the worker', 503, 'not_configured');
+  const body = await parseJson(request);
+  const attempt = String(body.password || '');
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  const windowStart = Date.now() - 900000;
+  const attempts = await env.DB.prepare("SELECT COUNT(*) count FROM audit_logs WHERE action='password_login_failed' AND target_id=? AND created_at>?").bind(ip, new Date(windowStart).toISOString()).first();
+  if (Number(attempts?.count || 0) >= 8) throw new ApiError('Too many attempts. Try again in 15 minutes.', 429, 'rate_limited');
+  const valid = attempt && constantEqual(await sha256hex(attempt), await sha256hex(env.ADMIN_PASSWORD));
+  if (!valid) { await audit(env, 'anonymous', 'password_login_failed', 'ip', ip, null, null, null, null); throw new ApiError('Invalid password', 401); }
+  const session = id(); const csrf = id();
+  await env.DB.prepare('INSERT OR IGNORE INTO admins VALUES(?,?,?,?)').bind(adminId, 'owner', 'Admin', now()).run();
+  await env.DB.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').bind(session, adminId, csrf, new Date(Date.now() + 604800000).toISOString(), now()).run();
+  await audit(env, adminId, 'password_login', 'ip', ip, null, null, null, null);
+  return json({ ok: true, csrf }, 200, { 'set-cookie': `premium_session=${session}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800` });
+}
 function cookie(request, name) { return (request.headers.get('cookie') || '').split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`))?.slice(name.length + 1); }
 async function admin(request, env, mutate = false) { const sessionId = cookie(request, 'premium_session'); const record = sessionId && await env.DB.prepare("SELECT sessions.*,admins.role FROM sessions JOIN admins USING(telegram_id) WHERE sessions.id=? AND sessions.expires_at>datetime('now')").bind(sessionId).first(); if (!record) throw new ApiError('Sign in required', 401); if (mutate && request.headers.get('x-csrf-token') !== record.csrf) throw new ApiError('Invalid CSRF token', 403); return record; }
 async function audit(env, actor, action, targetType, targetId, before, after, reason, requestId) { await env.DB.prepare('INSERT INTO audit_logs VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id(), String(actor), action, targetType || null, targetId ? String(targetId) : null, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, reason || null, requestId || null, now()).run(); }
@@ -82,6 +101,7 @@ async function route(request, env) {
   if(path==='/health') return json({ok:true,service:'crysnovax-premium',time:now()});
   if(path==='/api/public-config') return json({botUsername:env.TELEGRAM_BOT_USERNAME||''});
   if(path==='/api/auth/telegram'&&request.method==='POST') return telegramLogin(request,env);
+  if(path==='/api/auth/password'&&request.method==='POST') return passwordLogin(request,env);
   if(path==='/api/auth/me'){ const who=await admin(request,env); return json({telegramId:who.telegram_id,role:who.role,csrf:who.csrf}); }
   if(path.startsWith('/api/dashboard/')){ const who=await admin(request,env,request.method!=='GET'); if(path==='/api/dashboard/overview') return json(await overview(env)); if(path.startsWith('/api/dashboard/list/')) return json({items:await listData(env,path.split('/').pop(),url)}); if(path.startsWith('/api/dashboard/action/')) return json({result:await mutateAdmin(env,who,path.split('/').pop(),await parseJson(request),request)}); }
   if(path.startsWith('/api/v1/')) { const bodyText=['POST','PUT','PATCH'].includes(request.method)?await request.clone().text():''; await authenticateBot(request,env,bodyText); const input=bodyText?JSON.parse(bodyText):{};
