@@ -52,7 +52,7 @@ async function passwordLogin(request, env) {
 function cookie(request, name) { return (request.headers.get('cookie') || '').split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`))?.slice(name.length + 1); }
 async function admin(request, env, mutate = false) { const sessionId = cookie(request, 'premium_session'); const record = sessionId && await env.DB.prepare("SELECT sessions.*,admins.role FROM sessions JOIN admins USING(telegram_id) WHERE sessions.id=? AND sessions.expires_at>datetime('now')").bind(sessionId).first(); if (!record) throw new ApiError('Sign in required', 401); if (mutate && request.headers.get('x-csrf-token') !== record.csrf) throw new ApiError('Invalid CSRF token', 403); return record; }
 async function audit(env, actor, action, targetType, targetId, before, after, reason, requestId) { await env.DB.prepare('INSERT INTO audit_logs VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id(), String(actor), action, targetType || null, targetId ? String(targetId) : null, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, reason || null, requestId || null, now()).run(); }
-async function plans(env) { const { results } = await env.DB.prepare('SELECT * FROM plans WHERE enabled=1 ORDER BY display_order').all(); return results.map(plan => ({ ...plan, recurring: Boolean(plan.recurring), enabled: Boolean(plan.enabled), benefits: decode(plan.benefits) })); }
+async function plans(env) { const { results } = await env.DB.prepare('SELECT * FROM plans ORDER BY display_order').all(); return results.map(plan => ({ ...plan, recurring: Boolean(plan.recurring), enabled: Boolean(plan.enabled), benefits: decode(plan.benefits) })); }
 async function activeEntitlement(env, scope, target) { return env.DB.prepare("SELECT e.*,p.name,p.duration_seconds FROM entitlements e LEFT JOIN plans p ON p.id=e.plan_id WHERE e.scope=? AND e.telegram_id=? AND e.status='active' AND e.expires_at>datetime('now') ORDER BY e.expires_at DESC LIMIT 1").bind(scope, String(target)).first(); }
 async function restriction(env, userId, chatId, command) { return env.DB.prepare("SELECT * FROM restrictions WHERE active=1 AND ((scope='user' AND telegram_id=?) OR (scope='group' AND telegram_id=?)) AND (expires_at IS NULL OR expires_at>datetime('now')) AND (command IS NULL OR command=?) ORDER BY created_at DESC LIMIT 1").bind(String(userId), String(chatId || ''), command || '').first(); }
 async function status(env, userId, chatId) { const personal = await activeEntitlement(env, 'user', userId); const group = chatId ? await activeEntitlement(env, 'group', chatId) : null; const blocked = await restriction(env, userId, chatId); return { userId, chatId, premium: Boolean(personal || group), source: personal ? 'personal' : group ? 'group' : 'free', personal, group, restriction: blocked }; }
@@ -88,16 +88,101 @@ async function recordPayment(env, input) {
   return { duplicate:false, paymentId };
 }
 async function overview(env) { const row = await env.DB.prepare("SELECT (SELECT COUNT(*) FROM entitlements WHERE status='active' AND expires_at>datetime('now') AND scope='user') personal,(SELECT COUNT(*) FROM entitlements WHERE status='active' AND expires_at>datetime('now') AND scope='group') groups,(SELECT COALESCE(SUM(stars),0) FROM payments WHERE status='paid' AND kind='plan') revenue,(SELECT COALESCE(SUM(stars),0) FROM payments WHERE status='paid' AND kind='donation') donations,(SELECT COALESCE(SUM(count),0) FROM usage_daily WHERE day=date('now')) usage,(SELECT COALESCE(SUM(denied),0) FROM usage_daily WHERE day=date('now')) denied,(SELECT COALESCE(SUM(count),0) FROM usage_daily WHERE day=date('now') AND source!='free') premium_usage,(SELECT COALESCE(SUM(count),0) FROM usage_daily WHERE day=date('now') AND source='free') free_usage").first(); const commands = (await env.DB.prepare("SELECT command,SUM(count) usage,SUM(denied) denied,SUM(CASE WHEN source!='free' THEN count ELSE 0 END) premium_usage,SUM(CASE WHEN source='free' THEN count ELSE 0 END) free_usage FROM usage_daily WHERE day>=date('now','-7 days') GROUP BY command ORDER BY usage DESC LIMIT 10").all()).results; return { ...row, commands }; }
-async function listData(env, type, url) { const allowed={users:'subjects',plans:'plans',entitlements:'entitlements',payments:'payments',commands:'commands',restrictions:'restrictions',audit:'audit_logs'}; if(!allowed[type]) throw new ApiError('Unknown resource'); const limit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit')||50))); const {results}=await env.DB.prepare(`SELECT * FROM ${allowed[type]} ORDER BY ${type==='commands'?'name':'rowid'} DESC LIMIT ?`).bind(limit).all(); return results; }
+async function listData(env, type, url) {
+  const allowed={users:'subjects',plans:'plans',entitlements:'entitlements',payments:'payments',commands:'commands',restrictions:'restrictions',audit:'audit_logs'};
+  if(!allowed[type]) throw new ApiError('Unknown resource');
+  const limit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit')||50)));
+  const {results}=await env.DB.prepare(`SELECT * FROM ${allowed[type]} ORDER BY ${type==='commands'?'name':'rowid'} DESC LIMIT ?`).bind(limit).all();
+  return results.map(r => ({
+    ...r,
+    ...(type==='commands' ? { enabled:Boolean(r.enabled), premium_only:Boolean(r.premium_only) } : {}),
+    ...(type==='plans' ? { enabled:Boolean(r.enabled), recurring:Boolean(r.recurring), benefits:decode(r.benefits||'[]') } : {})
+  }));
+}
+async function notifyTelegram(env, chatId, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !chatId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }) });
+  } catch (_) { /* best-effort — never block a mutation */ }
+}
+function diffText(before, after, fields) {
+  return fields.flatMap(f => { const bv = before?.[f] ?? 'null'; const av = after?.[f] ?? 'null'; return String(bv) !== String(av) ? [`  <b>${f}:</b> ${bv} → ${av}`] : []; }).join('\n');
+}
 async function mutateAdmin(env, actor, action, input, request) {
   const requestId=request.headers.get('idempotency-key')||id(); let before=null, after=null;
-  if(action==='plan'){ before=await env.DB.prepare('SELECT * FROM plans WHERE id=?').bind(input.id).first(); await env.DB.prepare('UPDATE plans SET stars=?,enabled=?,benefits=?,updated_at=? WHERE id=?').bind(Number(input.stars),input.enabled?1:0,JSON.stringify(input.benefits||decode(before.benefits)),now(),input.id).run(); after=await env.DB.prepare('SELECT * FROM plans WHERE id=?').bind(input.id).first(); }
-  else if(action==='command'){ const name=safe(input.name).toLowerCase().replace(/[^a-z0-9_]/g,''); if(!name) throw new ApiError('Command name is required'); const category=['light','media','heavy_ai'].includes(input.category)?input.category:null; before=await env.DB.prepare('SELECT * FROM commands WHERE name=?').bind(name).first(); if(!before&&!category) throw new ApiError('Category is required for a new command'); await env.DB.prepare('INSERT INTO commands(name,category,enabled,premium_only,free_limit,premium_limit,group_limit,member_limit,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET category=excluded.category,enabled=excluded.enabled,premium_only=excluded.premium_only,free_limit=excluded.free_limit,premium_limit=excluded.premium_limit,group_limit=excluded.group_limit,member_limit=excluded.member_limit,updated_at=excluded.updated_at').bind(name,category||before.category,input.enabled?1:0,input.premiumOnly?1:0,input.freeLimit??null,input.premiumLimit??null,input.groupLimit??null,input.memberLimit??null,now()).run(); after=await env.DB.prepare('SELECT * FROM commands WHERE name=?').bind(name).first(); }
-  else if(action==='gift'){ const plan=await env.DB.prepare('SELECT * FROM plans WHERE id=?').bind(input.planId).first(); if(!plan||plan.scope!==input.scope) throw new ApiError('Invalid plan'); const start=now(),expires=new Date(Date.now()+plan.duration_seconds*1000).toISOString(); after={id:id(),scope:input.scope,telegram_id:String(input.telegramId),plan_id:plan.id,starts_at:start,expires_at:expires,recurring:0,status:'active',source:'gift',gifted_by:String(actor.telegram_id),reason:safe(input.reason),created_at:start}; await env.DB.prepare('INSERT INTO entitlements VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').bind(...Object.values(after)).run(); }
-  else if(action==='restrict'){ after={id:id(),scope:input.scope,telegram_id:String(input.telegramId),kind:input.kind||'ban',command:input.command||null,reason:safe(input.reason),expires_at:input.expiresAt||null,active:1,actor_id:String(actor.telegram_id),created_at:now()}; await env.DB.prepare('INSERT INTO restrictions VALUES(?,?,?,?,?,?,?,?,?,?)').bind(...Object.values(after)).run(); }
-  else if(action==='revoke'){ before=await env.DB.prepare('SELECT * FROM entitlements WHERE id=?').bind(input.id).first(); await env.DB.prepare("UPDATE entitlements SET status='revoked' WHERE id=?").bind(input.id).run(); after={...before,status:'revoked'}; }
-  else if(action==='reset'){ const scope=input.scope||'user',target=String(input.telegramId); before={scope,target}; await env.DB.prepare('DELETE FROM usage_daily WHERE scope=? AND telegram_id=?').bind(scope,target).run(); after={scope,target,reset:true}; }
-  else throw new ApiError('Unknown action'); await audit(env,actor.telegram_id,action,input.scope||action,input.telegramId||input.id||input.name,before,after,input.reason,requestId); return after;
+  const ownerIds = String(env.ADMIN_TELEGRAM_IDS||'').split(',').map(x=>x.trim()).filter(Boolean);
+  if(action==='plan'){
+    before=await env.DB.prepare('SELECT * FROM plans WHERE id=?').bind(input.id).first();
+    if(!before) throw new ApiError('Plan not found',404);
+    await env.DB.prepare('UPDATE plans SET stars=?,enabled=?,benefits=?,updated_at=? WHERE id=?').bind(Number(input.stars),input.enabled?1:0,JSON.stringify(input.benefits||decode(before.benefits||'[]')),now(),input.id).run();
+    after=await env.DB.prepare('SELECT * FROM plans WHERE id=?').bind(input.id).first();
+    after={ ...after, enabled:Boolean(after.enabled), recurring:Boolean(after.recurring), benefits:decode(after.benefits||'[]') };
+    const diff = diffText(before, after, ['stars','enabled','recurring']);
+    for (const oid of ownerIds) await notifyTelegram(env, oid, `<b>Plan updated</b> by admin ${actor.telegram_id}\n<code>${input.id}</code>\n${diff||'(no field changes)'}`);
+    const planChanged = String(before.stars)!==String(after.stars) || Boolean(before.enabled)!==Boolean(after.enabled) || Boolean(before.recurring)!==Boolean(after.recurring);
+    if(planChanged){
+      const { results: subs } = await env.DB.prepare("SELECT telegram_id,scope FROM entitlements WHERE plan_id=? AND status='active' AND expires_at>datetime('now')").bind(input.id).all();
+      const planLabel = before.name || input.id;
+      for(const sub of subs){
+        const msg = !after.enabled
+          ? `Your <b>${planLabel}</b> plan has been paused by the admin. Your access remains until expiry.`
+          : String(before.stars)!==String(after.stars)
+            ? `Your <b>${planLabel}</b> subscription price has changed to <b>${after.stars} Stars</b>. Your current access is unaffected.`
+            : `Your <b>${planLabel}</b> plan has been updated. No action needed.`;
+        await notifyTelegram(env, sub.telegram_id, msg);
+      }
+    }
+  }
+  else if(action==='command'){
+    const name=safe(input.name).toLowerCase().replace(/[^a-z0-9_]/g,''); if(!name) throw new ApiError('Command name is required');
+    const category=['light','media','heavy_ai'].includes(input.category)?input.category:null;
+    before=await env.DB.prepare('SELECT * FROM commands WHERE name=?').bind(name).first();
+    if(!before&&!category) throw new ApiError('Category is required for a new command');
+    const base = before || {};
+    const cat = category ?? base.category;
+    const enabled = 'enabled' in input ? (input.enabled ? 1 : 0) : (base.enabled ?? 1);
+    const premiumOnly = 'premiumOnly' in input ? (input.premiumOnly ? 1 : 0) : (base.premium_only ?? 0);
+    const freeLimit = 'freeLimit' in input ? (input.freeLimit===null ? null : Number(input.freeLimit)) : (base.free_limit ?? null);
+    const premiumLimit = 'premiumLimit' in input ? (input.premiumLimit===null ? null : Number(input.premiumLimit)) : (base.premium_limit ?? null);
+    const groupLimit = 'groupLimit' in input ? (input.groupLimit===null ? null : Number(input.groupLimit)) : (base.group_limit ?? null);
+    const memberLimit = 'memberLimit' in input ? (input.memberLimit===null ? null : Number(input.memberLimit)) : (base.member_limit ?? null);
+    await env.DB.prepare('INSERT INTO commands(name,category,enabled,premium_only,free_limit,premium_limit,group_limit,member_limit,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET category=excluded.category,enabled=excluded.enabled,premium_only=excluded.premium_only,free_limit=excluded.free_limit,premium_limit=excluded.premium_limit,group_limit=excluded.group_limit,member_limit=excluded.member_limit,updated_at=excluded.updated_at').bind(name,cat,enabled,premiumOnly,freeLimit,premiumLimit,groupLimit,memberLimit,now()).run();
+    after=await env.DB.prepare('SELECT * FROM commands WHERE name=?').bind(name).first();
+    after={ ...after, enabled:Boolean(after.enabled), premium_only:Boolean(after.premium_only) };
+    const isNew = !before;
+    const diff = isNew ? '' : diffText(before, after, ['category','enabled','premium_only','free_limit','premium_limit','group_limit','member_limit']);
+    for (const oid of ownerIds) await notifyTelegram(env, oid, `<b>Command ${isNew?'added':'updated'}</b> by admin ${actor.telegram_id}\n<code>/${name}</code>\n${diff||'(no field changes)'}`);
+  }
+  else if(action==='gift'){
+    const plan=await env.DB.prepare('SELECT * FROM plans WHERE id=?').bind(input.planId).first(); if(!plan||plan.scope!==input.scope) throw new ApiError('Invalid plan');
+    const start=now(),expires=new Date(Date.now()+plan.duration_seconds*1000).toISOString();
+    after={id:id(),scope:input.scope,telegram_id:String(input.telegramId),plan_id:plan.id,starts_at:start,expires_at:expires,recurring:0,status:'active',source:'gift',gifted_by:String(actor.telegram_id),reason:safe(input.reason),created_at:start};
+    await env.DB.prepare('INSERT INTO entitlements VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').bind(...Object.values(after)).run();
+    for (const oid of ownerIds) await notifyTelegram(env, oid, `<b>Premium gifted</b> by admin ${actor.telegram_id}\nTo: <code>${input.telegramId}</code>  Plan: ${plan.name||input.planId}\nExpires: ${expires.slice(0,10)}`);
+    await notifyTelegram(env, String(input.telegramId), `You have been gifted <b>${plan.name||input.planId}</b> premium access. Your access is active until ${expires.slice(0,10)}. Enjoy!`);
+  }
+  else if(action==='restrict'){
+    after={id:id(),scope:input.scope,telegram_id:String(input.telegramId),kind:input.kind||'ban',command:input.command||null,reason:safe(input.reason),expires_at:input.expiresAt||null,active:1,actor_id:String(actor.telegram_id),created_at:now()};
+    await env.DB.prepare('INSERT INTO restrictions VALUES(?,?,?,?,?,?,?,?,?,?)').bind(...Object.values(after)).run();
+    for (const oid of ownerIds) await notifyTelegram(env, oid, `<b>Restriction added</b> by admin ${actor.telegram_id}\nTarget: <code>${input.telegramId}</code>  Kind: ${input.kind||'ban'}\nReason: ${safe(input.reason)}`);
+  }
+  else if(action==='revoke'){
+    before=await env.DB.prepare('SELECT * FROM entitlements WHERE id=?').bind(input.id).first();
+    await env.DB.prepare("UPDATE entitlements SET status='revoked' WHERE id=?").bind(input.id).run();
+    after={...before,status:'revoked'};
+    if(before){
+      for (const oid of ownerIds) await notifyTelegram(env, oid, `<b>Entitlement revoked</b> by admin ${actor.telegram_id}\nUser: <code>${before.telegram_id}</code>  Plan: ${before.plan_id}`);
+      await notifyTelegram(env, String(before.telegram_id), `Your <b>${before.plan_id}</b> premium access has been revoked. Contact support if you believe this is an error.`);
+    }
+  }
+  else if(action==='reset'){
+    const scope=input.scope||'user',target=String(input.telegramId);
+    before={scope,target}; await env.DB.prepare('DELETE FROM usage_daily WHERE scope=? AND telegram_id=?').bind(scope,target).run(); after={scope,target,reset:true};
+    for (const oid of ownerIds) await notifyTelegram(env, oid, `<b>Usage reset</b> by admin ${actor.telegram_id}\nScope: ${scope}  Target: <code>${target}</code>`);
+  }
+  else throw new ApiError('Unknown action');
+  await audit(env,actor.telegram_id,action,input.scope||action,input.telegramId||input.id||input.name,before,after,input.reason,requestId);
+  return after;
 }
 async function route(request, env) {
   const url=new URL(request.url), path=url.pathname;
@@ -108,7 +193,7 @@ async function route(request, env) {
   if(path==='/api/auth/me'){ const who=await admin(request,env); return json({telegramId:who.telegram_id,role:who.role,csrf:who.csrf}); }
   if(path.startsWith('/api/dashboard/')){ const who=await admin(request,env,request.method!=='GET'); if(path==='/api/dashboard/overview') return json(await overview(env)); if(path.startsWith('/api/dashboard/list/')) return json({items:await listData(env,path.split('/').pop(),url)}); if(path.startsWith('/api/dashboard/action/')) return json({result:await mutateAdmin(env,who,path.split('/').pop(),await parseJson(request),request)}); }
   if(path.startsWith('/api/v1/')) { const bodyText=['POST','PUT','PATCH'].includes(request.method)?await request.clone().text():''; await authenticateBot(request,env,bodyText); const input=bodyText?JSON.parse(bodyText):{};
-    if(path==='/api/v1/commands') return json({commands:(await env.DB.prepare('SELECT name,category,enabled,premium_only FROM commands').all()).results});
+    if(path==='/api/v1/commands') return json({commands:(await env.DB.prepare('SELECT name,category,enabled,premium_only,free_limit,premium_limit,group_limit,member_limit,updated_at FROM commands').all()).results.map(r=>({...r,enabled:Boolean(r.enabled),premium_only:Boolean(r.premium_only)}))});
     if(path==='/api/v1/plans') return json({plans:await plans(env)}); if(path==='/api/v1/status') return json(await status(env,url.searchParams.get('userId'),url.searchParams.get('chatId'))); if(path==='/api/v1/usage/consume') return json(await consume(env,input)); if(path==='/api/v1/usage/refund') return json(await refundUsage(env,input)); if(path==='/api/v1/invoices') return json(await createIntent(env,input)); if(path==='/api/v1/invoices/validate') return json(await validateIntent(env,input)); if(path==='/api/v1/payments') return json(await recordPayment(env,input));
     if(path.startsWith('/api/v1/admin/')) { const allowed=String(env.ADMIN_TELEGRAM_IDS||'').split(',').map(x=>x.trim()); if(!allowed.includes(String(input.actorId))) throw new ApiError('Owner authorization required',403); const actor={telegram_id:String(input.actorId),role:'owner'}; return json({result:await mutateAdmin(env,actor,path.split('/').pop(),input,request)}); }
   }
