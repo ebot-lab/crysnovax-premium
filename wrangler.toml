@@ -1,7 +1,3 @@
-# GitHub Deployment Configuration
-# Binding ID: fe3eaf24-9ac7-444b-b7e7-692f36452451
-# Connect repository in Cloudflare dashboard → Pages
-
 name = "crysnovax-premium"
 account_id = "282b269d2530a8f05d715d715c81ba69"
 main = "src/worker.js"

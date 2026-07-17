@@ -20,6 +20,8 @@ async function authenticateBot(request, env, bodyText = '') {
 }
 async function telegramHash(data, token) { const secret = await crypto.subtle.digest('SHA-256', encoder.encode(token)); const key = await crypto.subtle.importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return hex(await crypto.subtle.sign('HMAC', key, encoder.encode(data))); }
 async function telegramLogin(request, env) {
+  if (!env.TELEGRAM_BOT_TOKEN) throw new ApiError('TELEGRAM_BOT_TOKEN secret is not set on the worker', 503, 'not_configured');
+  if (!String(env.ADMIN_TELEGRAM_IDS || '').trim()) throw new ApiError('ADMIN_TELEGRAM_IDS secret is not set on the worker', 503, 'not_configured');
   const body = await parseJson(request); const { hash, ...fields } = body; const check = Object.entries(fields).filter(([, value]) => value !== undefined && value !== '').sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join('\n');
   if (!hash || !constantEqual(hash, await telegramHash(check, env.TELEGRAM_BOT_TOKEN))) throw new ApiError('Invalid Telegram login', 401);
   if (Date.now() / 1000 - Number(fields.auth_date) > 86400) throw new ApiError('Login expired', 401);
@@ -78,6 +80,7 @@ async function mutateAdmin(env, actor, action, input, request) {
 async function route(request, env) {
   const url=new URL(request.url), path=url.pathname;
   if(path==='/health') return json({ok:true,service:'crysnovax-premium',time:now()});
+  if(path==='/api/public-config') return json({botUsername:env.TELEGRAM_BOT_USERNAME||''});
   if(path==='/api/auth/telegram'&&request.method==='POST') return telegramLogin(request,env);
   if(path==='/api/auth/me'){ const who=await admin(request,env); return json({telegramId:who.telegram_id,role:who.role,csrf:who.csrf}); }
   if(path.startsWith('/api/dashboard/')){ const who=await admin(request,env,request.method!=='GET'); if(path==='/api/dashboard/overview') return json(await overview(env)); if(path.startsWith('/api/dashboard/list/')) return json({items:await listData(env,path.split('/').pop(),url)}); if(path.startsWith('/api/dashboard/action/')) return json({result:await mutateAdmin(env,who,path.split('/').pop(),await parseJson(request),request)}); }
@@ -85,7 +88,7 @@ async function route(request, env) {
     if(path==='/api/v1/plans') return json({plans:await plans(env)}); if(path==='/api/v1/status') return json(await status(env,url.searchParams.get('userId'),url.searchParams.get('chatId'))); if(path==='/api/v1/usage/consume') return json(await consume(env,input)); if(path==='/api/v1/usage/refund') return json(await refundUsage(env,input)); if(path==='/api/v1/invoices') return json(await createIntent(env,input)); if(path==='/api/v1/invoices/validate') return json(await validateIntent(env,input)); if(path==='/api/v1/payments') return json(await recordPayment(env,input));
     if(path.startsWith('/api/v1/admin/')) { const allowed=String(env.ADMIN_TELEGRAM_IDS||'').split(',').map(x=>x.trim()); if(!allowed.includes(String(input.actorId))) throw new ApiError('Owner authorization required',403); const actor={telegram_id:String(input.actorId),role:'owner'}; return json({result:await mutateAdmin(env,actor,path.split('/').pop(),input,request)}); }
   }
-  if(path==='/'||path==='/dashboard') return env.ASSETS?env.ASSETS.fetch(request):new Response('Premium dashboard assets are not configured',{status:503});
+  if(path==='/'||path==='/dashboard') return env.ASSETS?env.ASSETS.fetch(new Request(new URL('/',request.url),request)):new Response('Premium dashboard assets are not configured',{status:503});
   return env.ASSETS?env.ASSETS.fetch(request):json({error:'Not found'},404);
 }
 export default { async fetch(request,env){ try{return await route(request,env)}catch(error){console.error(JSON.stringify({event:'request_error',message:error.message,path:new URL(request.url).pathname})); return json({error:error.message||'Internal error',code:error.code||'internal_error'},error.status||500)}}, async scheduled(_event,env){await env.DB.batch([env.DB.prepare('DELETE FROM nonces WHERE expires_at<?').bind(Date.now()),env.DB.prepare("DELETE FROM sessions WHERE expires_at<datetime('now')"),env.DB.prepare("UPDATE entitlements SET status='expired' WHERE status='active' AND expires_at<=datetime('now')")]);} };
